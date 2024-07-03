@@ -1,0 +1,8 @@
+**/build_files/*
+*.tfstate*
+**/backup/*
+**/op/*
+**/example_files/*
+**/.terraform/*
+**/.vscode/*
+dev
