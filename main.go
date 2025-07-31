@@ -10,13 +10,15 @@ import (
 )
 
 var (
-	version     string = "0.2.0"
-	releaseDate string = "Sep 22 2022"
+	version     = "1.0.6"
+	releaseDate = "July 25, 2025"
+	description = "Create Certificate and Push to AKV, Revoke Certificate in AppViewX, Remove Certificate from AKV and Search Certificate in AppViewX via Custom Workflow."
 )
 
 func init() {
 	log.Println("[INFO] version", version)
 	log.Println("[INFO] releaseDate", releaseDate)
+	log.Println("[INFO] description", description)
 }
 
 func main() {

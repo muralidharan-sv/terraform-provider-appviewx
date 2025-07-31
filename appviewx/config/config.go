@@ -6,4 +6,6 @@ type AppViewXEnvironment struct {
 	AppViewXEnvironmentIP   string
 	AppViewXEnvironmentPort string
 	AppViewXIsHTTPS         bool
+	AppViewXClientId        string
+	AppViewXClientSecret    string
 }

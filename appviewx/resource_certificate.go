@@ -7,10 +7,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/ioutil"
 	"log"
 	"math/rand"
 	"net/http"
-	"os"
+	"net/url"
 	"strconv"
 	"strings"
 
@@ -21,7 +22,7 @@ import (
 )
 
 func ResourceCertificateServer() *schema.Resource {
-	//fmt.Println("****************** SSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSS")
+	//fmt.Println("****************** Logging for test purpose")
 	return &schema.Resource{
 		Create: resourceCertificateServerCreate,
 		Read:   resourceCertificateServerRead,
@@ -64,11 +65,27 @@ func ResourceCertificateServer() *schema.Resource {
 				Type:     schema.TypeString,
 				Optional: true,
 			},
+			constants.CERTIFICATE_GROUP_NAME: &schema.Schema{
+				Type:     schema.TypeString,
+				Optional: true,
+			},
 			constants.CA_SETTING_NAME: &schema.Schema{
 				Type:     schema.TypeString,
 				Optional: true,
 			},
+			constants.CERTIFICATE_TYPE: &schema.Schema{
+				Type:     schema.TypeString,
+				Optional: true,
+			},
 			constants.VALIDITY: &schema.Schema{
+				Type:     schema.TypeInt,
+				Optional: true,
+			},
+			constants.VALIDITY_UNIT: &schema.Schema{
+				Type:     schema.TypeString,
+				Optional: true,
+			},
+			constants.VALIDITY_UNIT_VALUE: &schema.Schema{
 				Type:     schema.TypeInt,
 				Optional: true,
 			},
@@ -92,6 +109,22 @@ func ResourceCertificateServer() *schema.Resource {
 				Type:     schema.TypeBool,
 				Optional: true,
 			},
+			constants.RESOURCE_ID: &schema.Schema{
+				Type:     schema.TypeString,
+				Computed: true,
+			},
+			constants.KEY_DOWNLOAD_PATH: &schema.Schema{
+				Type:     schema.TypeString,
+				Optional: true,
+			},
+			constants.KEY_DOWNLOAD_PASSWORD: &schema.Schema{
+				Type:     schema.TypeString,
+				Optional: true,
+			},
+			constants.DOWNLOAD_PASSWORD_PROTECTED_KEY: &schema.Schema{
+				Type:     schema.TypeBool,
+				Optional: true,
+			},
 		},
 		Importer: &schema.ResourceImporter{
 			StateContext: resourceCertificateImport,
@@ -105,7 +138,7 @@ func resourceCertificateImport(ctx context.Context, d *schema.ResourceData, meta
 
 	parameters := strings.Split(id, ",")
 
-	fmt.Println("parameters = ", parameters)
+	log.Println("parameters = ", parameters)
 
 	return []*schema.ResourceData{d}, nil
 }
@@ -125,57 +158,166 @@ func resourceCertificateServerUpdate(resourceData *schema.ResourceData, m interf
 func resourceCertificateServerDelete(d *schema.ResourceData, m interface{}) error {
 	log.Println("[INFO]  **************** DELETE OPERATION NOT SUPPORTED FOR THIS RESOURCE **************** ")
 	// Delete implementation is empty since this resoruce is for the stateless generic api invocation
+	d.SetId("")
 	return nil
 }
 
 // TODO: cleanup to be done
 func resourceCertificateServerCreate(resourceData *schema.ResourceData, m interface{}) error {
 
-	fmt.Println("****************** Resource Certificate Server Create ******************")
+	log.Println("****************** Resource Certificate Server Create ******************")
 	configAppViewXEnvironment := m.(*config.AppViewXEnvironment)
 
 	appviewxUserName := configAppViewXEnvironment.AppViewXUserName
 	appviewxPassword := configAppViewXEnvironment.AppViewXPassword
+	appviewxClientId := configAppViewXEnvironment.AppViewXClientId
+	appviewxClientSecret := configAppViewXEnvironment.AppViewXClientSecret
 	appviewxEnvironmentIP := configAppViewXEnvironment.AppViewXEnvironmentIP
 	appviewxEnvironmentPort := configAppViewXEnvironment.AppViewXEnvironmentPort
 	appviewxEnvironmentIsHTTPS := configAppViewXEnvironment.AppViewXIsHTTPS
 	appviewxGwSource := "WEB"
-
-	appviewxSessionID, err := GetSession(appviewxUserName,
-		appviewxPassword,
-		appviewxEnvironmentIP,
-		appviewxEnvironmentPort,
-		appviewxGwSource, appviewxEnvironmentIsHTTPS)
-	if err != nil {
-		log.Println("[ERROR] Error in getting the session : ", err)
-		return nil
+	var appviewxSessionID, accessToken string
+	var err error
+	if appviewxUserName != "" && appviewxPassword != "" {
+		appviewxSessionID, err = GetSession(appviewxUserName, appviewxPassword, appviewxEnvironmentIP, appviewxEnvironmentPort, appviewxGwSource, appviewxEnvironmentIsHTTPS)
+		if err != nil {
+			log.Println("[ERROR] Error in getting the session due to : ", err)
+			return nil
+		}
+	} else if appviewxClientId != "" && appviewxClientSecret != "" {
+		accessToken, err = GetAccessToken(appviewxClientId, appviewxClientSecret, appviewxEnvironmentIP, appviewxEnvironmentPort, appviewxGwSource, appviewxEnvironmentIsHTTPS)
+		if err != nil {
+			log.Println("[ERROR] Error in getting the access token due to : ", err)
+			return nil
+		}
 	}
 
-	result := createCertificate(resourceData, configAppViewXEnvironment, appviewxSessionID)
+	result, err := createCertificate(resourceData, configAppViewXEnvironment, appviewxSessionID, accessToken)
+	if err != nil {
+		log.Println("[ERROR] Error in creating the certificate due to : ", err)
+		return err
+	}
 	if result.Response["resourceId"] == "" {
-		log.Println("[ERROR] Resource ID is not obtained to proceed with certificate download")
+		log.Println("[ERROR] Resource ID is not obtained from the certificate creation response to proceed with certificate download")
 		return errors.New("[ERROR] Resource ID is not obtained to proceed with certificate download")
 	}
 	resourceID := result.Response["resourceId"]
+	resourceData.Set(constants.RESOURCE_ID, resourceID)
+	resourceData.SetId(resourceID)
+	log.Println("[INFO] resource_id data is set in payload")
+
 	if resourceData.Get(constants.IS_SYNC) == nil || !resourceData.Get(constants.IS_SYNC).(bool) {
 		log.Println("[INFO] Certificate is created in ASYNC mode so download can be done once the certificate is issued.")
 		log.Println("[INFO] ***** Use this resource ID to download the certificate", resourceID)
 		resourceData.SetId(strconv.Itoa(rand.Int()))
 		return nil
 	} else {
-		result := downloadCertificateForSyncFlow(resourceData, resourceID, appviewxSessionID, configAppViewXEnvironment)
-		if result {
-			log.Println("[INFO] Certificate downloaded successfully in the specified path")
-			resourceData.SetId(strconv.Itoa(rand.Int()))
-		} else {
-			log.Println("[ERROR] Certificate was not downloaded in the specified path")
-			return errors.New("[ERROR] Certificate was not downloaded in the specified path")
+		log.Println("[INFO] Certificate is created in SYNC mode so proceeding with download.")
+		if err := downloadCertificate(resourceData, resourceID, appviewxSessionID, accessToken, configAppViewXEnvironment); err != nil {
+			return err
+		}
+		if resourceData.Get(constants.KEY_DOWNLOAD_PATH).(string) != "" {
+			log.Println("[INFO] Key download path is provided in the payload hence proceeding with key download")
+			if err := downloadKey(resourceData, resourceID, appviewxSessionID, accessToken, configAppViewXEnvironment); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
 }
 
-func createCertificate(resourceData *schema.ResourceData, configAppViewXEnvironment *config.AppViewXEnvironment, appviewxSessionID string) config.AppviewxCreateCertResponse {
+func downloadCertificate(resourceData *schema.ResourceData, resourceID string, appviewxSessionID string, accessToken string, configAppViewXEnvironment *config.AppViewXEnvironment) error {
+	var isChainRequired, ok bool
+	var downloadPassword string
+	commonName := resourceData.Get(constants.COMMON_NAME).(string)
+
+	downloadFormat := GetDownloadFormat(resourceData)
+	downloadPath := GetDownloadFilePath(resourceData, commonName, downloadFormat)
+	if downloadPassword, ok = GetDownloadPassword(resourceData, downloadFormat); !ok {
+		return errors.New("[ERROR] Error in getting the download password")
+	}
+	isChainRequired = resourceData.Get(constants.CERTIFICATE_CHAIN_REQUIRED).(bool)
+
+	if downloadSuccess := downloadCertificateFromAppviewx(resourceID, "", "", downloadFormat, downloadPassword, downloadPath, isChainRequired, appviewxSessionID, accessToken, configAppViewXEnvironment); downloadSuccess {
+		log.Println("[INFO] Certificate downloaded successfully in the specified path")
+		resourceData.SetId(strconv.Itoa(rand.Int()))
+	} else {
+		log.Println("[ERROR] Certificate was not downloaded in the specified path")
+		return errors.New("[ERROR] Certificate was not downloaded in the specified path")
+	}
+	return nil
+}
+
+func GetAccessToken(appviewxClientId, appviewxClientSecret, appviewxEnvironmentIP,
+	appviewxEnvironmentPort,
+	appviewxGwSource string,
+	appviewxEnvironmentIsHTTPS bool) (string, error) {
+	log.Println("[INFO] Request received for fetching access token")
+
+	headers := make(map[string]interface{})
+	headers[constants.CONTENT_TYPE] = constants.APPLICATION_URL_ENCODED
+	headers[constants.ACCEPT] = constants.APPLICATION_JSON
+
+	actionID := constants.APPVIEWX_GET_ACCESS_TOKEN_ACTION_ID
+
+	queryParams := make(map[string]string)
+	queryParams[constants.GW_SOURCE] = appviewxGwSource
+
+	payload := url.Values{}
+	payload.Set(constants.GRANT_TYPE, constants.CLIENT_CREDENTIALS)
+
+	url := GetURL(appviewxEnvironmentIP, appviewxEnvironmentPort, actionID, queryParams, appviewxEnvironmentIsHTTPS)
+
+	client := &http.Client{Transport: HTTPTransport()}
+	req, err := http.NewRequest(constants.POST, url, strings.NewReader(payload.Encode()))
+	req.SetBasicAuth(appviewxClientId, appviewxClientSecret)
+	if err != nil {
+		log.Println("[ERROR] Error in creating the new reqeust", err)
+		return "", err
+	}
+
+	for key, value := range headers {
+		value1 := fmt.Sprintf("%v", value)
+		key1 := fmt.Sprintf("%v", key)
+		req.Header.Add(key1, value1)
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		log.Println("[ERROR] Error in executing the request", err)
+		return "", err
+	}
+	log.Println("[INFO] Response status code : ", resp.Status)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		responseBody, err := io.ReadAll(resp.Body)
+		if err == nil {
+			log.Println("[ERROR] Response obtained : ", string(responseBody))
+			return "", errors.New("error in getting the access token due to " + string(responseBody))
+		}
+	}
+	defer resp.Body.Close()
+	responseContents, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		log.Println("[ERROR] error in reading the response body", err)
+		return "", err
+	}
+
+	response := make(map[string]interface{})
+	err = json.Unmarshal(responseContents, &response)
+	if err != nil {
+		log.Println("[ERROR] Error in Unmarshalling the responseContents", err)
+		return "", err
+	}
+
+	if response[constants.RESPONSE] != nil {
+		log.Println("[INFO] Access token retrieval success, access token will be used for AppViewX API calls")
+		return response[constants.RESPONSE].(string), nil
+	}
+	log.Println("[ERROR] Access token retrieval failed")
+	return "", errors.New("access token retrieval failed")
+}
+
+func createCertificate(resourceData *schema.ResourceData, configAppViewXEnvironment *config.AppViewXEnvironment, appviewxSessionID, accessToken string) (config.AppviewxCreateCertResponse, error) {
 	var result config.AppviewxCreateCertResponse
 	httpMethod := config.HTTPMethodPost
 	appviewxEnvironmentIP := configAppViewXEnvironment.AppViewXEnvironmentIP
@@ -192,7 +334,7 @@ func createCertificate(resourceData *schema.ResourceData, configAppViewXEnvironm
 	requestBody, err := json.Marshal(payload)
 	if err != nil {
 		log.Println("[ERROR] error in Marshalling the payload ", payload, err)
-		return result
+		return result, err
 	}
 	client := &http.Client{Transport: HTTPTransport()}
 
@@ -201,7 +343,7 @@ func createCertificate(resourceData *schema.ResourceData, configAppViewXEnvironm
 	req, err := http.NewRequest(httpMethod, url, bytes.NewBuffer(requestBody))
 	if err != nil {
 		log.Println("[ERROR] error in creating new Request", err)
-		return result
+		return result, err
 	}
 
 	for key, value := range headers {
@@ -209,211 +351,44 @@ func createCertificate(resourceData *schema.ResourceData, configAppViewXEnvironm
 		key1 := fmt.Sprintf("%v", key)
 		req.Header.Add(key1, value1)
 	}
-	req.Header.Add(constants.SESSION_ID, appviewxSessionID)
+	if appviewxSessionID != "" {
+		req.Header.Add(constants.SESSION_ID, appviewxSessionID)
+	} else {
+		req.Header.Add(constants.TOKEN, accessToken)
+	}
 
 	httpResponse, err := client.Do(req)
 	if err != nil {
-		log.Println("[ERROR] error in http request", err)
-		return result
+		log.Println("[ERROR] Error in making certificate create request due to ", err)
+		return result, err
 	} else {
-		log.Println("[DEBUG] Request success : url :", url)
+		log.Println("[INFO] Certificate creation request submitted successfully")
 	}
-	if !(httpResponse.StatusCode == 200 || httpResponse.StatusCode == 201 || httpResponse.StatusCode == 202) {
-		log.Println("[ERROR] Response.Status : ", httpResponse.Status)
-		log.Printf("[ERROR] Error in making http client request with status code : %d\n", httpResponse.StatusCode)
+	log.Println("[INFO] Response status code : ", httpResponse.Status)
+	if httpResponse.StatusCode < 200 || httpResponse.StatusCode >= 300 {
+		responseBody, err := io.ReadAll(httpResponse.Body)
+		if err == nil {
+			log.Println("[ERROR] Response obtained : ", string(responseBody))
+			return result, errors.New("error in creating the certificate due to " + string(responseBody))
+		}
 	}
 	responseByte, err := io.ReadAll(httpResponse.Body)
 	if err != nil {
 		log.Println(err)
+		return result, err
 	} else {
 		err = json.Unmarshal(responseByte, &result)
 		if err != nil {
-			log.Println("[ERROR] ", err)
+			log.Println("[ERROR] Unable to unmarshall the response due to ", err)
+			return result, err
 		} else {
-			log.Println("[INFO] Response for Certificate creation = ", result)
+			log.Println("[INFO] Response obtained successfully for certificate create")
 		}
 	}
-	return result
+	return result, nil
 
 }
 
-func downloadCertificateForSyncFlow(resourceData *schema.ResourceData, appviewxResourceId, appviewxSessionID string, configAppViewXEnvironment *config.AppViewXEnvironment) bool {
-	var downloadPath, downloadFormat, downloadPassword, commonName string
-	var isChainRequired bool
-	if resourceData.Get(constants.COMMON_NAME) != nil && resourceData.Get(constants.COMMON_NAME).(string) != "" {
-		commonName = resourceData.Get(constants.COMMON_NAME).(string)
-	} else {
-		log.Println("[INFO] Commona name is not specified to download the certificate so downloading with name enrolledCertificate")
-		commonName = "enrolledCertificate"
-	}
-
-	if resourceData.Get(constants.CERTIFICATE_DOWNLOAD_FORMAT) == nil {
-		downloadFormat = "CRT"
-	} else {
-		downloadFormat = resourceData.Get(constants.CERTIFICATE_DOWNLOAD_FORMAT).(string)
-	}
-	if resourceData.Get(constants.CERTIFICATE_DOWNLOAD_PATH) == nil && resourceData.Get(constants.COMMON_NAME) != nil {
-		downloadPath = "/tmp/" + commonName + "." + strings.ToLower(downloadFormat)
-	} else {
-		downloadPath = resourceData.Get(constants.CERTIFICATE_DOWNLOAD_PATH).(string)
-		if _, err := os.Stat(downloadPath); os.IsNotExist(err) {
-			os.MkdirAll(downloadPath, 0777)
-		}
-		downloadPath += "/" + commonName + "." + strings.ToLower(downloadFormat)
-	}
-	if resourceData.Get(constants.CERTIFICATE_DOWNLOAD_PASSWORD) != nil && (downloadFormat == "PFX" || downloadFormat == "JKS" || downloadFormat == "P12") {
-		downloadPassword = resourceData.Get(constants.CERTIFICATE_DOWNLOAD_PASSWORD).(string)
-	} else if (resourceData.Get(constants.CERTIFICATE_DOWNLOAD_PASSWORD) == nil || resourceData.Get(constants.CERTIFICATE_DOWNLOAD_PASSWORD) == "") && (downloadFormat == "PFX" || downloadFormat == "JKS" || downloadFormat == "P12") {
-		log.Println("[ERROR] Password not found for the specified download format")
-		return false
-	}
-	if resourceData.Get(constants.CERTIFICATE_CHAIN_REQUIRED) != nil {
-		isChainRequired = resourceData.Get(constants.CERTIFICATE_CHAIN_REQUIRED).(bool)
-	} else {
-		isChainRequired = false
-	}
-
-	searchResponse := searchCertificate(appviewxResourceId, appviewxSessionID, configAppViewXEnvironment)
-
-	if searchResponse.AppviewxResponse.ResponseObject.Objects[0].CommonName == "" || searchResponse.AppviewxResponse.ResponseObject.Objects[0].SerialNumber == "" {
-		log.Println("[ERROR] Cannot find the common name and serial number for the resource id " + appviewxResourceId + " to proceed with certificate download")
-		return false
-	}
-	commonName = searchResponse.AppviewxResponse.ResponseObject.Objects[0].CommonName
-	serialNumber := searchResponse.AppviewxResponse.ResponseObject.Objects[0].SerialNumber
-	return downloadCertificateFromAppviewx(commonName, serialNumber, downloadFormat, downloadPassword, downloadPath, isChainRequired, appviewxSessionID, configAppViewXEnvironment)
-}
-
-func searchCertificate(resourceID, appviewxSessionID string, configAppViewXEnvironment *config.AppViewXEnvironment) config.AppviewxSearchCertResponse {
-	var response config.AppviewxSearchCertResponse
-	httpMethod := config.HTTPMethodPost
-	appviewxEnvironmentIP := configAppViewXEnvironment.AppViewXEnvironmentIP
-	appviewxEnvironmentPort := configAppViewXEnvironment.AppViewXEnvironmentPort
-	appviewxEnvironmentIsHTTPS := configAppViewXEnvironment.AppViewXIsHTTPS
-	headers := frameHeaders()
-	url := GetURL(appviewxEnvironmentIP, appviewxEnvironmentPort, config.SearchCertificateActionId, frameQueryParams(), appviewxEnvironmentIsHTTPS)
-	payload := frameSearchCertificatePayload(resourceID)
-	requestBody, err := json.Marshal(payload)
-	if err != nil {
-		log.Println("[ERROR] error in Marshalling the payload ", payload, err)
-		return response
-	}
-	client := &http.Client{Transport: HTTPTransport()}
-
-	printRequest(httpMethod, url, headers, requestBody)
-
-	req, err := http.NewRequest(httpMethod, url, bytes.NewBuffer(requestBody))
-	if err != nil {
-		log.Println("[ERROR] error in creating new Request", err)
-		return response
-	}
-
-	for key, value := range headers {
-		value1 := fmt.Sprintf("%v", value)
-		key1 := fmt.Sprintf("%v", key)
-		req.Header.Add(key1, value1)
-	}
-	req.Header.Add(constants.SESSION_ID, appviewxSessionID)
-
-	httpResponse, err := client.Do(req)
-	if err != nil {
-		log.Println("[ERROR] error in http request", err)
-		return response
-	} else {
-		log.Println("[DEBUG] Request success : url :", url)
-	}
-	if !(httpResponse.StatusCode == 200 || httpResponse.StatusCode == 201 || httpResponse.StatusCode == 202) {
-		log.Println("[ERROR] Response.Status : ", httpResponse.Status)
-		log.Printf("[ERROR] Error in making http client request with status code : %d\n", httpResponse.StatusCode)
-	}
-	responseByte, err := io.ReadAll(httpResponse.Body)
-	if err != nil {
-		log.Println(err)
-	} else {
-		err = json.Unmarshal(responseByte, &response)
-		if err != nil {
-			log.Println("[ERROR] ", err)
-		} else {
-			log.Println("[INFO] Response for Certificate Search = ", response)
-		}
-	}
-	return response
-}
-
-func downloadCertificateFromAppviewx(commonName, serialNumber, downloadFormat, downloadPassword, downloadPath string, isChainRequired bool, appviewxSessionID string, configAppViewXEnvironment *config.AppViewXEnvironment) bool {
-	httpMethod := config.HTTPMethodPost
-	appviewxEnvironmentIP := configAppViewXEnvironment.AppViewXEnvironmentIP
-	appviewxEnvironmentPort := configAppViewXEnvironment.AppViewXEnvironmentPort
-	appviewxEnvironmentIsHTTPS := configAppViewXEnvironment.AppViewXIsHTTPS
-	headers := frameHeaders()
-	url := GetURL(appviewxEnvironmentIP, appviewxEnvironmentPort, config.DownloadCertificateActionId, frameQueryParams(), appviewxEnvironmentIsHTTPS)
-	payload := frameDownloadCertificatePayload(commonName, serialNumber, downloadFormat, downloadPassword, isChainRequired)
-	requestBody, err := json.Marshal(payload)
-	if err != nil {
-		log.Println("[ERROR] error in Marshalling the payload ", payload, err)
-		return false
-	}
-	client := &http.Client{Transport: HTTPTransport()}
-
-	printRequest(httpMethod, url, headers, requestBody)
-
-	req, err := http.NewRequest(httpMethod, url, bytes.NewBuffer(requestBody))
-	if err != nil {
-		log.Println("[ERROR] error in creating new Request", err)
-		return false
-	}
-
-	for key, value := range headers {
-		value1 := fmt.Sprintf("%v", value)
-		key1 := fmt.Sprintf("%v", key)
-		req.Header.Add(key1, value1)
-	}
-	req.Header.Add(constants.SESSION_ID, appviewxSessionID)
-
-	httpResponse, err := client.Do(req)
-	if err != nil {
-		log.Println("[ERROR] error in http request", err)
-		return false
-	} else {
-		log.Println("[DEBUG] Request success : url :", url)
-	}
-	if !(httpResponse.StatusCode == 200 || httpResponse.StatusCode == 201 || httpResponse.StatusCode == 202) {
-		log.Println("[ERROR] Response.Status : ", httpResponse.Status)
-		log.Printf("[ERROR] Error in making http client request with status code : %d\n", httpResponse.StatusCode)
-	}
-	responseByte, err := io.ReadAll(httpResponse.Body)
-	if err != nil {
-		log.Println("[ERROR] ", err)
-		return false
-	} else {
-		err = os.WriteFile(downloadPath, responseByte, 0777)
-		if err != nil {
-			log.Println("[ERROR] Error while writting certificate file content in ", downloadPath, " due to : ", err)
-			return false
-		} else {
-			log.Println("[INFO] Downloaded certificate file content in ", downloadPath)
-			return true
-		}
-	}
-
-}
-
-func frameSearchCertificatePayload(resourceId string) config.SearchCertificatePayload {
-	var payload config.SearchCertificatePayload
-	payload.Filter.SortOrder = "asc"
-	payload.Input.ResourceId = resourceId
-	return payload
-}
-
-func frameDownloadCertificatePayload(commonName, serialNumber, format, password string, isChainRequired bool) config.DownloadCertificatePayload {
-	var payload config.DownloadCertificatePayload
-	payload.CommonName = commonName
-	payload.SerialNumber = serialNumber
-	payload.Format = format
-	payload.IsChainRequired = isChainRequired
-	payload.Password = password
-	return payload
-}
 func frameCertificatePayload(resourceData *schema.ResourceData) config.CreateCertificatePayload {
 	var payload config.CreateCertificatePayload
 	var csrParams config.CSRParameters
@@ -438,6 +413,10 @@ func frameCertificatePayload(resourceData *schema.ResourceData) config.CreateCer
 	payload.CaConnectorInfo.CertificateAuthority = resourceData.Get(constants.CERTIFICATE_AUTHORITY).(string)
 	payload.CaConnectorInfo.CAConnectorName = payload.CaConnectorInfo.CertificateAuthority + " Connector  Terraform"
 	payload.CaConnectorInfo.ValidityInDays = resourceData.Get(constants.VALIDITY).(int)
+	payload.CaConnectorInfo.ValidityUnit = resourceData.Get(constants.VALIDITY_UNIT).(string)
+	payload.CaConnectorInfo.ValidityUnitValue = resourceData.Get(constants.VALIDITY_UNIT_VALUE).(int)
+	payload.CaConnectorInfo.CertificateType = resourceData.Get(constants.CERTIFICATE_TYPE).(string)
+	payload.CertificateGroup.CertificateGroupName = resourceData.Get(constants.CERTIFICATE_GROUP_NAME).(string)
 	customFields, ok := resourceData.GetOk(constants.CUSTOM_FIELDS)
 	if ok {
 		var customFieldValues = make(map[string]string)
